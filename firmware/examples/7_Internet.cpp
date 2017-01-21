@@ -1,9 +1,10 @@
+
 #include "InternetButton/InternetButton.h"
 #include "math.h"
 
 /* Let me show you how easy it is to put the Button on the Internet.
 Useful info, like how to access the data from your browser, can be
-found here: http://docs.particle.io/photon/firmware/#spark-function
+found here: https://docs.particle.io/reference/firmware/photon/#particle-function-
 
 The code to control the number of illuminated LEDs is here:
 https://github.com/spark/InternetButton/blob/master/controlKnob.html
@@ -25,7 +26,7 @@ void setup() {
 
     //This is all you need to make the function controller() available to the internet
     //The API name and the local name don't need to be the same; just my style
-    Spark.function("controller", controller);
+    Particle.function("controller", controller);
 
     //This function figures out what combination color, brightness and LEDs to display
     makeColors();
@@ -64,7 +65,7 @@ void loop(){
         }
     }
 
-    //If anything's been altered by clicking or the Spark.function, update the LEDs
+    //If anything's been altered by clicking or the Particle.function, update the LEDs
     if(changed){
         delay(10);
         makeColors();

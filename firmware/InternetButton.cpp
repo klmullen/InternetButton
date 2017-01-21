@@ -9,6 +9,8 @@ uint8_t b2 = 5;
 uint8_t b3 = 6;
 uint8_t b4 = 7;
 
+// start with pixel output not floating to avoid random pixels turning on during power-up
+STARTUP(pinMode(pin, INPUT_PULLDOWN);)
 
 Adafruit_NeoPixel ring = Adafruit_NeoPixel(PIXEL_COUNT, pin, PIXEL_TYPE);
 ADXL362 accelerometer;
@@ -23,7 +25,8 @@ void InternetButton::begin(){
 
     accelerometer.begin();                   // Setup SPI protocol, issue device soft reset
     accelerometer.beginMeasure();            // Switch ADXL362 to measure mode
-    accelerometer.checkAllControlRegs();     // Burst Read all Control Registers, to check for proper setup
+    // Uncomment to enable diagnostic info
+    // accelerometer.checkAllControlRegs();     // Burst Read all Control Registers, to check for proper setup
 
     pinMode(b1, INPUT_PULLUP);
     pinMode(b2, INPUT_PULLUP);
@@ -54,9 +57,17 @@ void InternetButton::begin(int i){
     pinMode(b4, INPUT_PULLUP);
 }
 
+/* If you solder on a 12th LED (WS2812B), then you'll want to call
+ * this function b.setNumLeds(12); after you call b.begin(); Any number of
+ * LEDs can also be soldered onto the output of the button.
+ */
+void InternetButton::setNumLeds(uint8_t i) {
+    ring.updateLength(i);
+}
+
 void InternetButton::ledOn(uint8_t i, uint8_t r, uint8_t g, uint8_t b){
     //i-1 shifts the location from human readable to the right index for the LEDs
-    if(i == 12){
+    if(i == 12 && ring.getNumLeds() < 12){
         ring.setPixelColor(0, ring.Color(r,g,b));
         ring.setPixelColor(10, ring.Color(r,g,b));
     }
@@ -152,25 +163,52 @@ uint8_t InternetButton::allButtonsOff(){
     }
 }
 
-void InternetButton::rainbow(uint8_t wait) {
-  uint16_t i, j;
+uint32_t InternetButton::wheel(uint8_t WheelPos) {
+  if(WheelPos < 85) {
+   return ring.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+  } else if(WheelPos < 170) {
+   WheelPos -= 85;
+   return ring.Color(255 - WheelPos * 3, 0, WheelPos * 3);
+  } else {
+   WheelPos -= 170;
+   return ring.Color(0, WheelPos * 3, 255 - WheelPos * 3);
+  }
+}
 
-  for(j=0; j<256; j++) { // 1 cycle of all colors on wheel
+void InternetButton::rainbow(uint8_t wait) {
+    uint16_t i, j;
+
+    for(j=0; j<256; j++) { // 1 cycle of all colors on wheel
+        for(i=0; i< 12; i++) {
+            uint8_t idx = ((i * 256 / ring.numPixels()) + j) & 255;
+            ring.setPixelColor(i, wheel(idx));
+        }
+        ring.show();
+        delay(wait);
+    }
+}
+
+void InternetButton::advanceRainbow(uint8_t amount, uint8_t wait) {
+    uint16_t i;
+    static uint16_t j = 0;
+
+    if (amount == 0) {
+        j = 0;
+        return;
+    }
+
+    if (j < 256) {
+        j += amount;
+    } else {
+        j = 0;
+    }
+
     for(i=0; i< 12; i++) {
-      uint8_t WheelPos = ((i * 256 / ring.numPixels()) + j) & 255;
-      if(WheelPos < 85) {
-         ring.setPixelColor(i,ring.Color(WheelPos * 3, 255 - WheelPos * 3, 0));
-      } else if(WheelPos < 170) {
-         WheelPos -= 85;
-         ring.setPixelColor(i,ring.Color(255 - WheelPos * 3, 0, WheelPos * 3));
-      } else {
-         WheelPos -= 170;
-         ring.setPixelColor(i,ring.Color(0, WheelPos * 3, 255 - WheelPos * 3));
-      }
+        uint8_t idx = ((i * 256 / ring.numPixels()) + j) & 255;
+        ring.setPixelColor(i, wheel(idx));
     }
     ring.show();
-    delay(wait);
-  }
+    if (wait > 0) delay(wait);
 }
 
 int InternetButton::readX(){
@@ -204,83 +242,126 @@ uint8_t InternetButton::lowestLed(){
     return ledPos;
 }
 
+void InternetButton::setBrightness(uint8_t brightness) {
+    ring.setBrightness(brightness);
+}
+
+uint8_t InternetButton::getBrightness() {
+    return ring.getBrightness();
+}
+
+int InternetButton::getBPM() {
+    return bpm;
+}
+
+void InternetButton::setBPM(int beats_per_minute) {
+    bpm = beats_per_minute;
+}
+
 void InternetButton::playSong(String song){
-    char inputStr[200];
-    song.toCharArray(inputStr,200);
-    
-    Serial.println(inputStr);
-    
+    char inputStr[song.length()];
+    song.toCharArray(inputStr,song.length());
+
+    // Uncomment for debugging, will affect BPM.
+    // Serial.println(inputStr);
+
     char *note = strtok(inputStr,",");
-    char *duration = strtok(NULL,",");
-    playNote(note,atoi(duration));
-    
-    while(duration != NULL){
+    char *duration = strtok(NULL,", \n");
+
+    while (duration != NULL) {
+        playNote(note,String(duration).toInt());
+        // Uncomment for debugging, will affect BPM.
+        // Serial.printlnf("note: %s dur: %s", note, duration);
         note = strtok(NULL,",");
-        Serial.println(note);
         duration = strtok(NULL,", \n");
-        Serial.println(duration);
-        //if(atoi(duration) <= 0){
-        //    break;
-        //}
-        playNote(note,atoi(duration));
     }
 }
 
-void InternetButton::playNote(String note, int duration){
+/*
+ * Supports all notes, sharp and flat.  Sharp can be 's','S' or '#'. Flat can be 'b' or 'B'.
+ * Octaves supported are 0-9, however only part of 0 is audible.
+ * Rest notes require a duration just like regular notes and can be 'r','R',"rest" or "REST".
+ * All song strings should end with ',',' ' or '\n' or else the last digit in a multi-digit
+ * duration will be truncated, i.e. 16 will become 1.
+ *
+ * // EXAMPLE USAGE
+ * b.playSong("C0,8,CS0,8,D0,8,DS0,8,E0,8,F0,8,FS0,8,G0,8,GS0,8,A0,8,AS0,8,B0,8\n");
+ * b.playSong("C1,8,CS1,8,D1,8,DS1,8,E1,8,F1,8,FS1,8,G1,8,GS1,8,A1,8,AS1,8,B1,8\n");
+ * b.playSong("C2,8,Cs2,8,D2,8,Ds2,8,E2,8,F2,8,Fs2,8,G2,8,Gs2,8,A2,8,As2,8,B2,8\n");
+ * b.playSong("C3,8,DB3,8,D3,8,EB3,8,E3,8,F3,8,GB3,8,G3,8,AB3,8,A3,8,BB3,8,B3,8\n");
+ * b.playSong("C4,8,Db4,8,D4,8,Eb4,8,E4,8,F4,8,Gb4,8,G4,8,Ab4,8,A4,8,Bb4,8,B4,8\n");
+ * b.playSong("c5,8,db5,8,d5,8,eb5,8,e5,8,f5,8,gb5,8,g5,8,ab5,8,a5,8,bb5,8,b5,8\n");
+ * b.playSong("C6,8,C#6,8,D6,8,D#6,8,E6,8,F6,8,F#6,8,G6,8,G#6,8,A6,8,A#6,8,B6,8\n");
+ * b.playSong("C7,8,R,8,D7,8,REST,8,E7,8,F7,8,R,8,G7,8,REST,8,A7,8,R,8,B7,8\n");
+ * b.playSong("C8,16,CS8,16,D8,16,DS8,16,E8,16,F8,16,FS8,16,G8,16,GS8,16,A8,16,AS8,16,B8,16\n");
+ * b.playSong("C9,32,CS9,32,D9,32,DS9,32,E9,32,F9,32,FS9,32,G9,32,GS9,32,A9,32,AS9,32,B9,32,C9,32,CS9,32,D9,32,DS9,32,E9,32,F9,32,FS9,32,G9,32,GS9,32,A9,32,AS9,32,B9,32\n");
+ */
+void InternetButton::playNote(String note, int duration) {
+
     int noteNum = 0;
+    int noteSharp = 0;
+    int noteFlat = 0;
     int octave = 5;
     int freq = 256;
-    
-     //if(9 - int(command.charAt(1)) != null){
-    char octavo[5];
-    String tempString = note.substring(1,2);
-    tempString.toCharArray(octavo,5);
-    octave = atoi(octavo);
-    //}
-    
-    if(duration != 0){
-        duration = 1000/duration;
+
+    int octIndex = note.length()-1; // octave is the last char
+    String tempOctave = note.substring(octIndex, octIndex+1);
+    octave = tempOctave.toInt();
+    String tempNote = note.substring(0, octIndex);
+    tempNote.toUpperCase();
+    if (tempNote.length()==2) {
+        if (tempNote.charAt(1)=='S' || tempNote.charAt(1)=='#') {
+            noteSharp = 1;
+        } else if (tempNote.charAt(1)=='B') {
+            noteFlat = 1;
+        }
     }
-    
-    switch(note.charAt(0)){
+
+    // Using 240 instead of 250 after calibrating at 60 BPM and 240 BPM with a stopwatch.
+    // Seems to work well with and without Serial logging, so that is ok to leave uncommented below.
+    if (duration != 0) {
+        duration = 1000*240/bpm/duration;
+    }
+
+    switch (tempNote.charAt(0)) {
         case 'C':
-            noteNum = 0;
+            noteNum = 0 + noteSharp;
             break;
         case 'D':
-            noteNum = 2;
+            noteNum = 2 + noteSharp - noteFlat;
             break;
         case 'E':
-            noteNum = 4;
+            noteNum = 4 - noteFlat;
             break;
         case 'F':
-            noteNum = 5;
+            noteNum = 5 + noteSharp;
             break;
         case 'G':
-            noteNum = 7;
+            noteNum = 7 + noteSharp - noteFlat;
             break;
         case 'A':
-            noteNum = 9;
+            noteNum = 9 + noteSharp - noteFlat;
             break;
         case 'B':
-            noteNum = 11;
+            noteNum = 11 - noteFlat;
             break;
-        case 'R':          // Rest note
+        case 'R': // Rest note 'R' or 'REST'
             octave = -1;
             break;
         default:
             break;
-            //return -1;
     }
-    
+
     // based on equation at http://www.phy.mtu.edu/~suits/NoteFreqCalcs.html and the Verdi tuning
     // fn = f0*(2^1/12)^n where n = number of half-steps from the reference frequency f0
     freq = float(256*pow(1.05946,(     12.0*(octave-4)        +noteNum)));
-    //          C4^  (2^1/12)^    12 half-steps in an octave      ^how many extra half-steps within that octave, 0 for a C
-    
-    tone(D0,int(freq),duration);
+    //          C4^  (2^1/12)^    12 half-steps in an octave      ^how many extra half-steps within that octave, 0 for 'C'
+
+    // Serial.printlnf("%-3s o:%-2d f:%-5d d:%d", tempNote.c_str(), octave, int(freq), duration);
+
+    if (octave != -1) tone(D0, int(freq), duration);
     delay(duration);
-    noTone(D0);
-    //return freq;
+    if (octave != -1) noTone(D0);
 }
 
 /*
@@ -354,28 +435,28 @@ void ADXL362::beginMeasure() {
 //IMPORTANT to make it a signed 8-bit int so that the data is interpreted correctly
 int ADXL362::readX(){
   int8_t XDATA = SPIreadOneRegister(0x08);
-//#ifdef ADXL362_DEBUG
-//  Serial.print(  "XDATA = ");
-//  Serial.println(XDATA);
-//#endif
+#ifdef ADXL362_DEBUG
+ Serial.print("XDATA = ");
+ Serial.println(XDATA);
+#endif
   return (int)XDATA;
 }
 
 int ADXL362::readY(){
   int8_t YDATA = SPIreadOneRegister(0x09);
-//#ifdef ADXL362_DEBUG
-//  Serial.print(  "\tYDATA = ");
-//  Serial.println(YDATA);
-//#endif
+#ifdef ADXL362_DEBUG
+ Serial.print("\tYDATA = ");
+ Serial.println(YDATA);
+#endif
   return (int)YDATA;
 }
 
 int ADXL362::readZ(){
   int8_t ZDATA = SPIreadOneRegister(0x0A);
-//#ifdef ADXL362_DEBUG
-//  Serial.print(  "\tZDATA = ");
-//  Serial.println(ZDATA);
-//#endif
+#ifdef ADXL362_DEBUG
+ Serial.print("\tZDATA = ");
+ Serial.println(ZDATA);
+#endif
   return (int)ZDATA;
 }
 
@@ -386,7 +467,7 @@ int ADXL362::readZ(){
 int ADXL362::readX16(){
   int16_t XDATA = SPIreadTwoRegisters(XL362_XDATA_L);
 #ifdef ADXL362_DEBUG
-  Serial.print(  "XDATA = ");
+  Serial.print("XDATA = ");
   Serial.println(XDATA);
 #endif
   return XDATA;
@@ -395,7 +476,7 @@ int ADXL362::readX16(){
 int ADXL362::readY16(){
   int16_t YDATA = SPIreadTwoRegisters(XL362_YDATA_L);
 #ifdef ADXL362_DEBUG
-  Serial.print(  "\tYDATA = ");
+  Serial.print("\tYDATA = ");
   Serial.println(YDATA);
 #endif
   return YDATA;
@@ -404,7 +485,7 @@ int ADXL362::readY16(){
 int ADXL362::readZ16(){
   int16_t ZDATA = SPIreadTwoRegisters(XL362_ZDATA_L);
 #ifdef ADXL362_DEBUG
-  Serial.print(  "\tZDATA = ");
+  Serial.print("\tZDATA = ");
   Serial.println(ZDATA);
 #endif
   return ZDATA;
@@ -414,10 +495,10 @@ int ADXL362::readZ16(){
 //worth knowing that this is an INTERNAL temperature measurement, so doesn't reflect the environment accurately
 int16_t ADXL362::readTemp(){
   int16_t TEMP = SPIreadTwoRegisters(XL362_TEMP_L);
-//#ifdef ADXL362_DEBUG
-//  Serial.print("\tTEMP = ");
-//  Serial.println(TEMP);
-//#endif
+#ifdef ADXL362_DEBUG
+  Serial.print("\tTEMP = ");
+  Serial.println(TEMP);
+#endif
   return TEMP;
 }
 
@@ -441,10 +522,10 @@ void ADXL362::readXYZTData(short &XData, short &YData, short &ZData, float &Temp
   digitalWrite(slaveSelectPin, HIGH);
 
 #ifdef ADXL362_DEBUG
-  Serial.print(  "XDATA = "); Serial.print(XData);
-  Serial.print(  "\tYDATA = "); Serial.print(YData);
-  Serial.print(  "\tZDATA = "); Serial.print(ZData);
-  Serial.println(  "\tTemperature = "); Serial.println(Temperature);
+  Serial.print("XDATA = "); Serial.print(XData);
+  Serial.print("\tYDATA = "); Serial.print(YData);
+  Serial.print("\tZDATA = "); Serial.print(ZData);
+  Serial.println("\tTemperature = "); Serial.println(Temperature);
 #endif
 }
 
@@ -467,9 +548,9 @@ void ADXL362::readXYZmg(int &X, int &Y, int &Z){
   Z = (int)ZData * mgperLSB;
 
 #ifdef ADXL362_DEBUG
-  Serial.print(  "x = "); Serial.print(X);
-  Serial.print(  "\ty = "); Serial.print(Y);
-  Serial.println(  "\tz = "); Serial.print(Z);
+  Serial.print("x = "); Serial.print(X);
+  Serial.print("\ty = "); Serial.print(Y);
+  Serial.println("\tz = "); Serial.print(Z);
 #endif
 }
 
@@ -661,17 +742,31 @@ void ADXL362::SPIwriteTwoRegisters(uint8_t regAddress, int twoRegValue){
 //----------------- LED Handling ------------------------//
 
 /*-------------------------------------------------------------------------
-  Spark Core library to control WS2811/WS2812 based RGB
-  LED devices such as Adafruit NeoPixel strips.
-  Currently handles 800 KHz and 400kHz bitstream on Spark Core,
-  WS2812, WS2812B and WS2811.
+  Spark Core, Particle Photon, P1, Electron and RedBear Duo library to control
+  WS2811/WS2812 based RGB LED devices such as Adafruit NeoPixel strips.
 
-  Also supports Radio Shack Tri-Color Strip with TM1803 controller
-  400kHz bitstream.
+  Supports:
+  - 800 KHz and 400kHz bitstream WS2812, WS2812B and WS2811
+  - 800 KHz bitstream SK6812RGBW (NeoPixel RGBW pixel strips)
+    (use 'SK6812RGBW' as PIXEL_TYPE)
+
+  Also supports:
+  - Radio Shack Tri-Color Strip with TM1803 controller 400kHz bitstream.
+  - TM1829 pixels
+
+  PLEASE NOTE that the NeoPixels require 5V level inputs
+  and the Spark Core, Particle Photon, P1, Electron and RedBear Duo only
+  have 3.3V level outputs. Level shifting is necessary, but will require
+  a fast device such as one of the following:
+
+  [SN74HCT125N]
+  http://www.digikey.com/product-detail/en/SN74HCT125N/296-8386-5-ND/376860
+
+  [SN74HCT245N]
+  http://www.digikey.com/product-detail/en/SN74HCT245N/296-1612-5-ND/277258
 
   Written by Phil Burgess / Paint Your Dragon for Adafruit Industries.
-  Modified to work with Spark Core by Technobly.
-  Modified to work with Spark Button by jenesaisdiq.
+  Modified to work with Particle devices by Technobly.
   Contributions by PJRC and other members of the open source community.
 
   Adafruit invests time and resources providing this open source code,
@@ -698,36 +793,62 @@ void ADXL362::SPIwriteTwoRegisters(uint8_t regAddress, int twoRegValue){
   <http://www.gnu.org/licenses/>.
   -------------------------------------------------------------------------*/
 
-#if PLATFORM_ID == 0 // Core
+#if PLATFORM_ID == 0 // Core (0)
   #define pinLO(_pin) (PIN_MAP[_pin].gpio_peripheral->BRR = PIN_MAP[_pin].gpio_pin)
   #define pinHI(_pin) (PIN_MAP[_pin].gpio_peripheral->BSRR = PIN_MAP[_pin].gpio_pin)
-#elif PLATFORM_ID == 6 // Photon
-  //#include "pinmap_impl.h"
+#elif (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
   STM32_Pin_Info* PIN_MAP2 = HAL_Pin_Map(); // Pointer required for highest access speed
   #define pinLO(_pin) (PIN_MAP2[_pin].gpio_peripheral->BSRRH = PIN_MAP2[_pin].gpio_pin)
   #define pinHI(_pin) (PIN_MAP2[_pin].gpio_peripheral->BSRRL = PIN_MAP2[_pin].gpio_pin)
 #else
-  #error "*** PLATFORM_ID not supported by this library. PLATFORM should be Core or Photon ***"
+  #error "*** PLATFORM_ID not supported by this library. PLATFORM should be Core, Photon, P1, Electron or RedBear Duo ***"
 #endif
 // fast pin access
 #define pinSet(_pin, _hilo) (_hilo ? pinHI(_pin) : pinLO(_pin))
 
 Adafruit_NeoPixel::Adafruit_NeoPixel(uint16_t n, uint8_t p, uint8_t t) :
-  numLEDs(n), numBytes(n*3), brightness(0), pixels(NULL), type(t), endTime(0)
+  begun(false), type(t), brightness(0), pixels(NULL), endTime(0)
 {
-  if((pixels = (uint8_t *)malloc(numBytes))) {
-    memset(pixels, 0, numBytes);
-  }
+  updateLength(n);
+  setPin(p);
 }
 
 Adafruit_NeoPixel::~Adafruit_NeoPixel() {
-  if(pixels) free(pixels);
-  pinMode(pin, INPUT);
+  if (pixels) free(pixels);
+  if (pin >= 0) pinMode(pin, INPUT);
+}
+
+void Adafruit_NeoPixel::updateLength(uint16_t n) {
+  if (pixels) free(pixels); // Free existing data (if any)
+
+  // Allocate new data -- note: ALL PIXELS ARE CLEARED
+  numBytes = n * ((type == SK6812RGBW) ? 4 : 3);
+  if ((pixels = (uint8_t *)malloc(numBytes))) {
+    memset(pixels, 0, numBytes);
+    numLEDs = n;
+  } else {
+    numLEDs = numBytes = 0;
+  }
 }
 
 void Adafruit_NeoPixel::begin(void) {
-  pinMode(pin, OUTPUT);
-  digitalWrite(pin, LOW);
+  if (pin >= 0) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);
+  }
+  begun = true;
+}
+
+// Set the output pin number
+void Adafruit_NeoPixel::setPin(uint8_t p) {
+    if (begun && (pin >= 0)) {
+        pinMode(pin, INPUT);
+    }
+    pin = p;
+    if (begun) {
+        pinMode(p, OUTPUT);
+        digitalWrite(p, LOW);
+    }
 }
 
 void Adafruit_NeoPixel::show(void) {
@@ -741,18 +862,21 @@ void Adafruit_NeoPixel::show(void) {
   // rather than stalling for the latch.
   uint32_t wait_time; // wait time in microseconds.
   switch(type) {
-    case TM1803: // TM1803 = 24us reset pulse
-      wait_time = 24L;
-      break;
-    case TM1829: // TM1829 = 500us reset pulse
-      wait_time = 500L;
-      break;
+    case TM1803: { // TM1803 = 24us reset pulse
+        wait_time = 24L;
+      } break;
+    case SK6812RGBW: { // SK6812RGBW = 80us reset pulse
+        wait_time = 80L;
+      } break;
+    case TM1829: { // TM1829 = 500us reset pulse
+        wait_time = 500L;
+      } break;
     case WS2812B: // WS2812 & WS2812B = 50us reset pulse
     case WS2812B2:
     case WS2811: // WS2811 = 50us reset pulse
-    default:     // default = 50us reset pulse
-      wait_time = 50L;
-      break;
+    default: {   // default = 50us reset pulse
+        wait_time = 50L;
+      } break;
   }
   while((micros() - endTime) < wait_time);
   // endTime is a private member (rather than global var) so that multiple
@@ -762,15 +886,16 @@ void Adafruit_NeoPixel::show(void) {
   __disable_irq(); // Need 100% focus on instruction timing
 
   volatile uint32_t
-    c,    // 24-bit pixel color
-    mask; // 8-bit mask
+    c,    // 24-bit/32-bit pixel color
+    mask; // 1-bit mask
   volatile uint16_t i = numBytes; // Output loop counter
   volatile uint8_t
     j,              // 8-bit inner loop counter
    *ptr = pixels,   // Pointer to next byte
     g,              // Current green byte value
     r,              // Current red byte value
-    b;              // Current blue byte value
+    b,              // Current blue byte value
+    w;              // Current white byte value
 
   if(type == WS2812B) { // same as WS2812, 800 KHz bitstream
     while(i) { // While bytes left... (3 bytes = 1 pixel)
@@ -786,7 +911,7 @@ void Adafruit_NeoPixel::show(void) {
         if (c & mask) { // if masked bit is high
           // WS2812 spec             700ns HIGH
           // Adafruit on Arduino    (meas. 812ns)
-          // This lib on Spark Core (meas. 790ns)
+          // This lib on Spark Core (meas. 804ns)
           // This lib on Photon     (meas. 792ns)
           asm volatile(
             "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
@@ -797,7 +922,7 @@ void Adafruit_NeoPixel::show(void) {
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t"
-#if PLATFORM_ID == 6 // Photon
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
@@ -810,18 +935,18 @@ void Adafruit_NeoPixel::show(void) {
             ::: "r0", "cc", "memory");
           // WS2812 spec             600ns LOW
           // Adafruit on Arduino    (meas. 436ns)
-          // This lib on Spark Core (meas. 445ns)
+          // This lib on Spark Core (meas. 446ns)
           // This lib on Photon     (meas. 434ns)
           pinSet(pin, LOW); // LOW
           asm volatile(
             "mov r0, r0" "\n\t"
-#if PLATFORM_ID == 6 // Photon
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
-            "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t"
 #endif
             ::: "r0", "cc", "memory");
         }
@@ -832,16 +957,17 @@ void Adafruit_NeoPixel::show(void) {
           // This lib on Photon     (meas. 308ns)
           asm volatile(
             "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
-#if PLATFORM_ID == 6 // Photon
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t"
 #endif
             ::: "r0", "cc", "memory");
           // WS2812 spec             800ns LOW
           // Adafruit on Arduino    (meas. 938ns)
-          // This lib on Spark Core (meas. 946ns)
-          // This lib on Photon     (meas. 934ns)
+          // This lib on Spark Core (meas. 944ns)
+          // This lib on Photon     (meas. 936ns)
           pinSet(pin, LOW); // LOW
           asm volatile(
             "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
@@ -851,7 +977,7 @@ void Adafruit_NeoPixel::show(void) {
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
-#if PLATFORM_ID == 6 // Photon
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
@@ -870,8 +996,111 @@ void Adafruit_NeoPixel::show(void) {
       } while ( ++j < 24 ); // ... pixel done
     } // end while(i) ... no more pixels
   }
+  else if(type == SK6812RGBW) { // similar to WS2812, 800 KHz bitstream but with RGB+W components
+    while(i) { // While bytes left... (4 bytes = 1 pixel)
+      mask = 0x80000000; // reset the mask
+      i = i-4;      // decrement bytes remaining
+      r = *ptr++;   // Next red byte value
+      g = *ptr++;   // Next green byte value
+      b = *ptr++;   // Next blue byte value
+      w = *ptr++;   // Next white byte value
+      c = ((uint32_t)r << 24) | ((uint32_t)g << 16) | ((uint32_t)b <<  8) | w; // Pack the next 4 bytes to keep timing tight
+      j = 0;        // reset the 32-bit counter
+      do {
+        pinSet(pin, HIGH); // HIGH
+        if (c & mask) { // if masked bit is high
+          // SK6812RGBW spec         600ns HIGH
+          // WS2812 spec             700ns HIGH
+          // Adafruit on Arduino    (meas. 812ns)
+          // This lib on Spark Core (meas. 610ns)
+          // This lib on Photon     (meas. 608ns)
+          asm volatile(
+            "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t"
+#endif
+            ::: "r0", "cc", "memory");
+          // SK6812RGBW spec         600ns LOW
+          // WS2812 spec             600ns LOW
+          // Adafruit on Arduino    (meas. 436ns)
+          // This lib on Spark Core (meas. 598ns)
+          // This lib on Photon     (meas. 600ns)
+          pinSet(pin, LOW); // LOW
+          asm volatile(
+            "mov r0, r0" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#endif
+            ::: "r0", "cc", "memory");
+        }
+        else { // else masked bit is low
+          // SK6812RGBW spec         300ns HIGH
+          // WS2812 spec             350ns HIGH
+          // Adafruit on Arduino    (meas. 312ns)
+          // This lib on Spark Core (meas. 305ns)
+          // This lib on Photon     (meas. 308ns)
+          asm volatile(
+            "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t"
+#endif
+            ::: "r0", "cc", "memory");
+          // SK6812RGBW spec         900ns LOW
+          // WS2812 spec             800ns LOW
+          // Adafruit on Arduino    (meas. 938ns)
+          // This lib on Spark Core (meas. 904ns)
+          // This lib on Photon     (meas. 900ns)
+          pinSet(pin, LOW); // LOW
+          asm volatile(
+            "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t"
+#endif
+            ::: "r0", "cc", "memory");
+        }
+        mask >>= 1;
+      } while ( ++j < 32 ); // ... pixel done
+    } // end while(i) ... no more pixels
+  }
   else if(type == WS2812B2) { // WS2812B with DWT timer
-#if PLATFORM_ID == 6 // Photon
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
     #define CYCLES_800_T0H  25 // 312ns (meas. 300ns)
     #define CYCLES_800_T0L  70 // 938ns (meas. 940ns)
     #define CYCLES_800_T1H  80 // 812ns (meas. 792ns)
@@ -922,6 +1151,7 @@ void Adafruit_NeoPixel::show(void) {
           // WS2811 spec             1.20us HIGH
           // Adafruit on Arduino    (meas. 1.25us)
           // This lib on Spark Core (meas. 1.25us)
+          // This lib on Photon     (meas. 1.25us)
           asm volatile(
             "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
@@ -937,10 +1167,26 @@ void Adafruit_NeoPixel::show(void) {
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t"
+#endif
             ::: "r0", "cc", "memory");
           // WS2811 spec             1.30us LOW
           // Adafruit on Arduino    (meas. 1.25us)
           // This lib on Spark Core (meas. 1.24us)
+          // This lib on Photon     (meas. 1.24us)
           pinSet(pin, LOW); // LOW
           asm volatile(
             "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
@@ -955,21 +1201,46 @@ void Adafruit_NeoPixel::show(void) {
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#endif
             ::: "r0", "cc", "memory");
         }
         else { // else masked bit is low
           // WS2811 spec             500ns HIGH
           // Adafruit on Arduino    (meas. 500ns)
           // This lib on Spark Core (meas. 500ns)
+          // This lib on Photon     (meas. 500ns)
           asm volatile(
             "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#endif
             "nop" "\n\t" "nop" "\n\t"
             ::: "r0", "cc", "memory");
           // WS2811 spec             2.000us LOW
           // Adafruit on Arduino    (meas. 2.000us)
           // This lib on Spark Core (meas. 2.000us)
+          // This lib on Photon     (meas. 2.000us)
           pinSet(pin, LOW); // LOW
           asm volatile(
             "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
@@ -994,6 +1265,29 @@ void Adafruit_NeoPixel::show(void) {
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#endif
             ::: "r0", "cc", "memory");
         }
         mask >>= 1;
@@ -1015,6 +1309,7 @@ void Adafruit_NeoPixel::show(void) {
           // TM1803 spec             1.36us HIGH
           // Pololu on Arduino      (meas. 1.31us)
           // This lib on Spark Core (meas. 1.36us)
+          // This lib on Photon     (meas. 1.36us)
           asm volatile(
             "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
@@ -1032,21 +1327,50 @@ void Adafruit_NeoPixel::show(void) {
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t"
+#endif
             ::: "r0", "cc", "memory");
           // TM1803 spec             680ns LOW
           // Pololu on Arduino      (meas. 1.024us)
           // This lib on Spark Core (meas. 680ns)
+          // This lib on Photon     (meas. 684ns)
           pinSet(pin, LOW); // LOW
           asm volatile(
             "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t"
+#endif
             ::: "r0", "cc", "memory");
         }
         else { // else masked bit is low
           // TM1803 spec             680ns HIGH
           // Pololu on Arduino      (meas. 374ns)
           // This lib on Spark Core (meas. 680ns)
+          // This lib on Photon     (meas. 684ns)
           asm volatile(
             "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
@@ -1054,10 +1378,21 @@ void Adafruit_NeoPixel::show(void) {
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t"
+#endif
             ::: "r0", "cc", "memory");
           // TM1803 spec             1.36us LOW
           // Pololu on Arduino      (meas. 2.00us)
           // This lib on Spark Core (meas. 1.36us)
+          // This lib on Photon     (meas. 1.36us)
           pinSet(pin, LOW); // LOW
           asm volatile(
             "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
@@ -1072,6 +1407,24 @@ void Adafruit_NeoPixel::show(void) {
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t"
+#endif
             ::: "r0", "cc", "memory");
         }
         mask >>= 1;
@@ -1091,33 +1444,60 @@ void Adafruit_NeoPixel::show(void) {
       for( ;; ) {   // ... pixel done
         if (c & mask) { // if masked bit is high
           // TM1829 spec             800ns LOW
-          // This lib on Spark Core (meas. 792ns)
+          // This lib on Spark Core (meas. 806ns)
+          // This lib on Photon     (meas. 792ns)
           mask >>= 1; // Do this task during the long delay of this bit
           asm volatile(
             "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t"
+#endif
             ::: "r0", "cc", "memory");
           j++;
           // TM1829 spec             300ns HIGH
-          // This lib on Spark Core (meas. 319ns)
+          // This lib on Spark Core (meas. 305ns)
+          // This lib on Photon     (meas. 300ns)
           pinSet(pin, HIGH); // HIGH
           asm volatile(
-            "mov r0, r0" "\n\t" "nop" "\n\t"
+            "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t"
+#endif
             ::: "r0", "cc", "memory");
           if(j==24) break;
           pinSet(pin, LOW); // LOW
         }
         else { // else masked bit is low
           // TM1829 spec             300ns LOW
-          // This lib on Spark Core (meas. 306ns)
+          // This lib on Spark Core (meas. 390ns)
+          // This lib on Photon     (meas. 300ns)
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
           asm volatile(
-            "mov r0, r0" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "mov r0, r0" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t"
             ::: "r0", "cc", "memory");
+#endif
           // TM1829 spec             800ns HIGH
-          // This lib on Spark Core (meas. 805ns)
+          // This lib on Spark Core (meas. 792ns)
+          // This lib on Photon     (meas. 800ns)
           pinSet(pin, HIGH); // HIGH
           j++;
           mask >>= 1; // Do this task during the long delay of this bit
@@ -1128,6 +1508,16 @@ void Adafruit_NeoPixel::show(void) {
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
             "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#if (PLATFORM_ID == 6) || (PLATFORM_ID == 8) || (PLATFORM_ID == 10) || (PLATFORM_ID == 88) // Photon (6), P1 (8), Electron (10) or Redbear Duo (88)
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+            "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t" "nop" "\n\t"
+#endif
             ::: "r0", "cc", "memory");
           if(j==24) break;
           pinSet(pin, LOW); // LOW
@@ -1140,17 +1530,9 @@ void Adafruit_NeoPixel::show(void) {
   endTime = micros(); // Save EOD time for latch on next call
 }
 
-// Set the output pin number
-void Adafruit_NeoPixel::setPin(uint8_t p) {
-  pinMode(pin, INPUT);
-  pin = p;
-  pinMode(p, OUTPUT);
-  digitalWrite(p, LOW);
-}
-
 // Set pixel color from separate R,G,B components:
 void Adafruit_NeoPixel::setPixelColor(
- uint16_t n, uint8_t r, uint8_t g, uint8_t b) {
+  uint16_t n, uint8_t r, uint8_t g, uint8_t b) {
   if(n < numLEDs) {
     if(brightness) { // See notes in setBrightness()
       r = (r * brightness) >> 8;
@@ -1170,6 +1552,47 @@ void Adafruit_NeoPixel::setPixelColor(
         *p++ = r;
         *p++ = b;
         *p = g;
+        break;
+      case WS2811: // WS2811 is RGB order
+      case TM1803: // TM1803 is RGB order
+      default:     // default is RGB order
+        *p++ = r;
+        *p++ = g;
+        *p = b;
+        break;
+    }
+  }
+}
+
+// Set pixel color from separate R,G,B,W components:
+void Adafruit_NeoPixel::setPixelColor(
+  uint16_t n, uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
+  if(n < numLEDs) {
+    if(brightness) { // See notes in setBrightness()
+      r = (r * brightness) >> 8;
+      g = (g * brightness) >> 8;
+      b = (b * brightness) >> 8;
+      w = (w * brightness) >> 8;
+    }
+    uint8_t *p = &pixels[n * (type==SK6812RGBW?4:3)];
+    switch(type) {
+      case WS2812B: // WS2812 & WS2812B is GRB order.
+      case WS2812B2:
+        *p++ = g;
+        *p++ = r;
+        *p = b;
+        break;
+      case TM1829: // TM1829 is special RBG order
+        if(r == 255) r = 254; // 255 on RED channel causes display to be in a special mode.
+        *p++ = r;
+        *p++ = b;
+        *p = g;
+        break;
+      case SK6812RGBW: // SK6812RGBW is RGBW order
+        *p++ = r;
+        *p++ = g;
+        *p++ = b;
+        *p = w;
         break;
       case WS2811: // WS2811 is RGB order
       case TM1803: // TM1803 is RGB order
@@ -1183,6 +1606,7 @@ void Adafruit_NeoPixel::setPixelColor(
 }
 
 // Set pixel color from 'packed' 32-bit RGB color:
+// If RGB+W color, order of bytes is WRGB in packed 32-bit form
 void Adafruit_NeoPixel::setPixelColor(uint16_t n, uint32_t c) {
   if(n < numLEDs) {
     uint8_t
@@ -1194,29 +1618,71 @@ void Adafruit_NeoPixel::setPixelColor(uint16_t n, uint32_t c) {
       g = (g * brightness) >> 8;
       b = (b * brightness) >> 8;
     }
-    uint8_t *p = &pixels[n * 3];
+    uint8_t *p = &pixels[n * (type==SK6812RGBW?4:3)];
     switch(type) {
       case WS2812B: // WS2812 & WS2812B is GRB order.
-      case WS2812B2:
-        *p++ = g;
-        *p++ = r;
-        *p = b;
+      case WS2812B2: {
+          *p++ = g;
+          *p++ = r;
+          *p = b;
+        }
         break;
-      case TM1829: // TM1829 is special RBG order
-        if(r == 255) r = 254; // 255 on RED channel causes display to be in a special mode.
-        *p++ = r;
-        *p++ = b;
-        *p = g;
+      case TM1829: { // TM1829 is special RBG order
+          if(r == 255) r = 254; // 255 on RED channel causes display to be in a special mode.
+          *p++ = r;
+          *p++ = b;
+          *p = g;
+        }
+        break;
+      case SK6812RGBW: { // SK6812RGBW is RGBW order
+          uint8_t w = (uint8_t)(c >> 24);
+          *p++ = r;
+          *p++ = g;
+          *p++ = b;
+          *p = brightness ? ((w * brightness) >> 8) : w;
+        }
         break;
       case WS2811: // WS2811 is RGB order
       case TM1803: // TM1803 is RGB order
-      default:     // default is RGB order
-        *p++ = r;
-        *p++ = g;
-        *p = b;
+      default: {   // default is RGB order
+          *p++ = r;
+          *p++ = g;
+          *p = b;
+        }
         break;
     }
   }
+}
+
+void Adafruit_NeoPixel::setColor(uint16_t aLedNumber, byte aRed, byte aGreen, byte aBlue) {
+  return setPixelColor(aLedNumber, (uint8_t) aRed, (uint8_t) aGreen, (uint8_t) aBlue);
+}
+
+void Adafruit_NeoPixel::setColor(uint16_t aLedNumber, byte aRed, byte aGreen, byte aBlue, byte aWhite) {
+  return setPixelColor(aLedNumber, (uint8_t) aRed, (uint8_t) aGreen, (uint8_t) aBlue, (uint8_t) aWhite);
+}
+
+void Adafruit_NeoPixel::setColorScaled(uint16_t aLedNumber, byte aRed, byte aGreen, byte aBlue, byte aScaling) {
+  // scale RGB with a common brightness parameter
+  setColor(aLedNumber, (aRed*aScaling)>>8, (aGreen*aScaling)>>8, (aBlue*aScaling)>>8);
+}
+
+void Adafruit_NeoPixel::setColorScaled(uint16_t aLedNumber, byte aRed, byte aGreen, byte aBlue, byte aWhite, byte aScaling) {
+  // scale RGB with a common brightness parameter
+  setColor(aLedNumber, (aRed*aScaling)>>8, (aGreen*aScaling)>>8, (aBlue*aScaling)>>8, (aWhite*aScaling)>>8);
+}
+
+void Adafruit_NeoPixel::setColorDimmed(uint16_t aLedNumber, byte aRed, byte aGreen, byte aBlue, byte aBrightness) {
+  setColorScaled(aLedNumber, aRed, aGreen, aBlue, brightnessToPWM(aBrightness));
+}
+
+void Adafruit_NeoPixel::setColorDimmed(uint16_t aLedNumber, byte aRed, byte aGreen, byte aBlue, byte aWhite, byte aBrightness) {
+  setColorScaled(aLedNumber, aRed, aGreen, aBlue, aWhite, brightnessToPWM(aBrightness));
+}
+
+byte Adafruit_NeoPixel::brightnessToPWM(byte aBrightness) {
+  static const byte pwmLevels[16] = { 0, 1, 2, 3, 4, 6, 8, 12, 23, 36, 48, 70, 95, 135, 190, 255 };
+  return pwmLevels[aBrightness>>4];
 }
 
 // Convert separate R,G,B into packed 32-bit RGB color.
@@ -1225,27 +1691,41 @@ uint32_t Adafruit_NeoPixel::Color(uint8_t r, uint8_t g, uint8_t b) {
   return ((uint32_t)r << 16) | ((uint32_t)g <<  8) | b;
 }
 
+// Convert separate R,G,B,W into packed 32-bit WRGB color.
+// Packed format is always WRGB, regardless of LED strand color order.
+uint32_t Adafruit_NeoPixel::Color(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
+  return ((uint32_t)w << 24) | ((uint32_t)r << 16) | ((uint32_t)g <<  8) | b;
+}
+
 // Query color from previously-set pixel (returns packed 32-bit RGB value)
 uint32_t Adafruit_NeoPixel::getPixelColor(uint16_t n) const {
   if(n >= numLEDs) {
     // Out of bounds, return no color.
     return 0;
   }
-  uint8_t *p = &pixels[n * 3];
+
+  uint8_t *p = &pixels[n * (type==SK6812RGBW?4:3)];
   uint32_t c;
 
   switch(type) {
     case WS2812B: // WS2812 & WS2812B is GRB order.
-    case WS2812B2:
-      c = ((uint32_t)p[1] << 16) | ((uint32_t)p[0] <<  8) | (uint32_t)p[2];
+    case WS2812B2: {
+        c = ((uint32_t)p[1] << 16) | ((uint32_t)p[0] <<  8) | (uint32_t)p[2];
+      }
       break;
-    case TM1829: // TM1829 is special RBG order
-      c = ((uint32_t)p[0] << 16) | ((uint32_t)p[2] <<  8) | (uint32_t)p[1];
+    case TM1829: { // TM1829 is special RBG order
+        c = ((uint32_t)p[0] << 16) | ((uint32_t)p[2] <<  8) | (uint32_t)p[1];
+      }
+      break;
+    case SK6812RGBW: { // SK6812RGBW is RGBW order, but returns packed WRGB color
+        c = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] <<  8) | (uint32_t)p[3];
+      }
       break;
     case WS2811: // WS2811 is RGB order
     case TM1803: // TM1803 is RGB order
-    default:     // default is RGB order
-      c = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] <<  8) | (uint32_t)p[2];
+    default: {   // default is RGB order
+        c = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] <<  8) | (uint32_t)p[2];
+      }
       break;
   }
 
@@ -1254,6 +1734,9 @@ uint32_t Adafruit_NeoPixel::getPixelColor(uint16_t n) const {
   if(brightness) { // See notes in setBrightness()
     //Cast the color to a byte array
     uint8_t * c_ptr =reinterpret_cast<uint8_t*>(&c);
+    if (type == SK6812RGBW) {
+      c_ptr[3] = (c_ptr[3] << 8)/brightness;
+    }
     c_ptr[0] = (c_ptr[0] << 8)/brightness;
     c_ptr[1] = (c_ptr[1] << 8)/brightness;
     c_ptr[2] = (c_ptr[2] << 8)/brightness;
@@ -1267,6 +1750,10 @@ uint8_t *Adafruit_NeoPixel::getPixels(void) const {
 
 uint16_t Adafruit_NeoPixel::numPixels(void) const {
   return numLEDs;
+}
+
+uint16_t Adafruit_NeoPixel::getNumLeds(void) const {
+  return numPixels();
 }
 
 // Adjust output brightness; 0=darkest (off), 255=brightest.  This does
